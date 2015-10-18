@@ -13,50 +13,100 @@
   [server room]
   (format "wss://%s/room/%s/ws" server (pencode room)))
 
-(defn respond
-  [state msg]
-  (case (:type msg)
-    "hello-event"
-    [(assoc state :whoami (-> msg :data :id))]
+(def nick "hillbot")
 
-    "ping-event"
-    [state {:type "ping-reply"
-            :data {:time (-> msg :data :time)}}]
+(defn send-message
+  [{:as session :keys [sender wc]} msg]
+  (send sender (fn serial-send [_]
+                 (doto wc (s/put! (json/generate-string msg)))))
+  nil)
 
-    "snapshot-event"
-    [(assoc state :lifecycle :joined)]
+(defn auto-respond
+  [{:as session :keys [state sender]} msg]
+  (dosync
+   (case (:type msg)
+     "hello-event"
+     (do (alter state assoc :whoami (-> msg :data :id))
+         (send-message session {:type "nick" :data {:name nick}}))
 
-    "bounce-event"
-    [(assoc state :lifecycle :authing)]
+     "ping-event"
+     (send-message session
+                   {:type "ping-reply"
+                    :data {:time (-> msg :data :time)}})
 
-    [state]))
+     "snapshot-event"
+     (alter state assoc :lifecycle :joined)
 
-(defonce client
-  (atom nil))
+     "bounce-event"
+     (alter state assoc :lifecycle :authing)
 
-(defn spin
-  [wc]
-  (loop [state {:lifecycle :handshake}]
+     "send-event"
+     (println (format "%s \"%s\" said:\n%s"
+                      (-> msg :data :sender :id)
+                      (-> msg :data :sender :name)
+                      (-> msg :data :content)))
+
+     "join-event"
+     (println (format "%s \"%s\" joined"
+                      (-> msg :data :id)
+                      (-> msg :data :name)))
+
+     "part-event"
+     (println (format "%s \"%s\" left"
+                      (-> msg :data :id)
+                      (-> msg :data :name)))
+
+     "nick-event"
+     (println (format "%s changed nick from \"%s\" to \"%s\""
+                      (-> msg :data :id)
+                      (-> msg :data :from)
+                      (-> msg :data :to)))
+
+     ("nick-reply")
+     nil
+
+     (prn msg))))
+
+(defn react-to
+  [{:as session :keys [wc state sender]}]
+  (while true ;; (not= (:lifecycle @state) :end)
     (let [msg (json/parse-string @(s/take! wc) true)]
-      (println "RECV" (:type msg))
-      (when (:throttled msg)
+      (auto-respond session msg))))
+
+(def initial-state
+  {:lifecycle :handshake})
+
+(defn run
+  "Start a session and yield it as a map of:
+
+- :state A ref of session state
+- :wc Websocket client
+- :sender An agent used to send messages in coordination with state changes"
+  [server room]
+  (let [url (address server room)
+        wc @(ah/websocket-client url)
+        state (ref initial-state)
+        sender (agent nil
+                      :error-handler (fn sender-error [a e]
+                                       (println "Error in sender agent.")
+                                       (.printStackTrace e))
+                      :error-mode :fail)
+        session {:state state
+                 :wc wc
+                 :sender sender}
+        reactor (future (try (react-to session)
+                             (catch Throwable t
+                               (.printStackTrace t)
+                               (throw t))))]
+    session))
+
+;; TODO
+#_      (when (:throttled msg)
         (println "Throttled, sleeping.")
         (Thread/sleep 300))
-      (let [[state reply] (respond state msg)
-            state (assoc state :last-msg msg)]
-        (when reply
-          (s/put! wc (json/generate-string reply)))
-        (if (= (:lifecycle state) :joined)
-          state
-          (recur state))))))
 
 (defn -main
   "Demo connection to heim"
   [server room]
-  (let [url (address server room)
-        wc (reset! client @(ah/websocket-client url))
-        spinner (future (try (spin wc)
-                             (catch Throwable t
-                               (.printStackTrace t)
-                               (throw t))))]
-    spinner))
+  (let [session (run server room)]
+    ))
