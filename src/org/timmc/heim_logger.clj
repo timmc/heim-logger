@@ -13,65 +13,50 @@
   [server room]
   (format "wss://%s/room/%s/ws" server (pencode room)))
 
-(def nick "hillbot")
-
 (defn send-message
   [{:as session :keys [sender wc]} msg]
   (send sender (fn serial-send [_]
                  (doto wc (s/put! (json/generate-string msg)))))
   nil)
 
-(defn auto-respond
-  [{:as session :keys [state sender]} msg]
-  (dosync
-   (case (:type msg)
-     "hello-event"
-     (do (alter state assoc :whoami (-> msg :data :id))
-         (send-message session {:type "nick" :data {:name nick}}))
 
-     "ping-event"
+(defn base-dispatch
+  "Base dispatch map for message types."
+  [nick]
+  {"hello-event"
+   (fn [{:as session :keys [state]} msg]
+     (alter state assoc-in [:base :whoami] (-> msg :data :id))
+     (send-message session {:type "nick" :data {:name nick}}))
+
+   "ping-event"
+   (fn [session msg]
      (send-message session
                    {:type "ping-reply"
-                    :data {:time (-> msg :data :time)}})
+                    :data {:time (-> msg :data :time)}}))
 
-     "snapshot-event"
-     (alter state assoc :lifecycle :joined)
+   "snapshot-event"
+   (fn [{:as session :keys [state]} msg]
+     (alter state assoc-in [:base :lifecycle] :joined))
 
-     "bounce-event"
-     (alter state assoc :lifecycle :authing)
+   "bounce-event"
+   (fn [{:as session :keys [state]} msg]
+     (alter state assoc-in [:base :lifecycle] :authing))
+   })
 
-     "send-event"
-     (println (format "%s \"%s\" said:\n%s"
-                      (-> msg :data :sender :id)
-                      (-> msg :data :sender :name)
-                      (-> msg :data :content)))
-
-     "join-event"
-     (println (format "%s \"%s\" joined"
-                      (-> msg :data :id)
-                      (-> msg :data :name)))
-
-     "part-event"
-     (println (format "%s \"%s\" left"
-                      (-> msg :data :id)
-                      (-> msg :data :name)))
-
-     "nick-event"
-     (println (format "%s changed nick from \"%s\" to \"%s\""
-                      (-> msg :data :id)
-                      (-> msg :data :from)
-                      (-> msg :data :to)))
-
-     ("nick-reply")
-     nil
-
-     (prn msg))))
+(defn auto-respond
+  [session msg dispatch]
+  (dosync
+   (when-let [pre-handler (get dispatch :pre)]
+     (pre-handler session msg))
+   (when-let [handler (get dispatch (:type msg)
+                           (:unknown-type dispatch))]
+     (handler session msg))))
 
 (defn react-to
-  [{:as session :keys [wc state sender]}]
+  [{:as session :keys [wc state sender dispatch]}]
   (while true ;; (not= (:lifecycle @state) :end)
     (let [msg (json/parse-string @(s/take! wc) true)]
-      (auto-respond session msg))))
+      (auto-respond session msg dispatch))))
 
 (def initial-state
   {:lifecycle :handshake})
@@ -82,7 +67,7 @@
 - :state A ref of session state
 - :wc Websocket client
 - :sender An agent used to send messages in coordination with state changes"
-  [server room]
+  [server room dispatch]
   (let [url (address server room)
         wc @(ah/websocket-client url)
         state (ref initial-state)
@@ -93,7 +78,8 @@
                       :error-mode :fail)
         session {:state state
                  :wc wc
-                 :sender sender}
+                 :sender sender
+                 :dispatch dispatch}
         reactor (future (try (react-to session)
                              (catch Throwable t
                                (.printStackTrace t)
@@ -105,8 +91,39 @@
         (println "Throttled, sleeping.")
         (Thread/sleep 300))
 
+;; ============
+
+(defn do-nothing
+  [session msg])
+
+(def logger-dispatch
+  (merge
+   (base-dispatch "hillbot")
+   {"send-event"
+    do-nothing
+
+    "join-event"
+    do-nothing
+
+    "part-event"
+    do-nothing
+
+    "nick-event"
+    do-nothing
+
+    "nick-reply"
+    do-nothing
+
+    :pre
+    (fn [session msg]
+      (prn msg))
+
+    :unknown-type
+    (fn [session msg]
+      (println "Unknown event type:" (:type msg)))}))
+
 (defn -main
   "Demo connection to heim"
   [server room]
-  (let [session (run server room)]
+  (let [session (run server room logger-dispatch)]
     ))
