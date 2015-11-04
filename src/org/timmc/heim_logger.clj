@@ -54,12 +54,12 @@
 
 (defn react-to
   [{:as session :keys [wc state sender dispatch]}]
-  (while true ;; (not= (:lifecycle @state) :end)
+  (while true ;; (not= (get-in @state [:base :lifecycle]) :end)
     (let [msg (json/parse-string @(s/take! wc) true)]
       (auto-respond session msg dispatch))))
 
 (def initial-state
-  {:lifecycle :handshake})
+  {:base {:lifecycle :handshake}})
 
 (defn run
   "Start a session and yield it as a map of:
