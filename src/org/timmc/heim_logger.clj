@@ -145,56 +145,100 @@ the :halt action if specified."
       (do ;; something's wrong
         (println msg)))))
 
+(defn oldest-msg
+  "Find the oldest message-data in a coll of them."
+  [msg-datas]
+  (max-1 (fn compare-times [x y]
+           ;; Reverse sort, get msg with min time
+           (- (:time y) (:time x)))
+         msg-datas))
+
+(defn newest-msg
+  "Find the newest message-data in a coll of them."
+  [msg-datas]
+  (max-1 (fn compare-times [x y]
+           (- (:time x) (:time y)))
+         msg-datas))
+
 (defn log-messages
-  "Log message datas to file."
-  [session event-datas]
-  (let [w (-> session :state deref :logger :writer)]
+  "Log message datas to file and note the newest."
+  [{:as session :keys [state]} msg-datas]
+  (let [w (-> @state :logger :writer)]
     (binding [*out* w]
-      (doseq [m event-datas]
+      (doseq [m msg-datas]
         (println (json/generate-string {:hl-type "message"
                                         :data m}))))
     (.flush w)))
 
+(defn mark-latest-message
+  "Given some new message-datas, potentially note one of them as the
+newest message we've seen. Return the newest message value."
+  [{:as session :keys [state]} msg-datas]
+  (get-in
+   (alter state
+          (fn [oldstate]
+            (let [prev-last-seen (-> oldstate :logger :last-seen-msg)
+                  newest (newest-msg (concat msg-datas
+                                             (when prev-last-seen
+                                               [prev-last-seen])))]
+              (assoc-in oldstate [:logger :last-seen-msg] newest))))
+   [:logger :last-seen-msg]))
+
+(defn mark-catchup-complete
+  "Make a mark in the log indicating where we'll need to catch up to
+next time."
+  [{:as session :keys [state]} msg]
+  (println "Marking catchup complete to" (:id msg))
+  (let [w (-> @state :logger :writer)]
+    (binding [*out* w]
+      (println (json/generate-string {:hl-type "caughtup"
+                                      :data msg})))
+    (.flush w)))
+
+(defn done-catching-up?
+  "Have we encountered overlap with the previous catchup marker?"
+  [{:as session :keys [state]} msg-datas]
+  (let [catchup-to-id (-> @state :logger :catchup-to-id)]
+    (contains? (set (map :id msg-datas))
+               catchup-to-id)))
+
 (defn do-send-event
   "Log a single new message to file."
   [session msg]
-  (log-messages session [(get-in msg [:data])]))
-
-(defn oldest-msg-id
-  [msgs]
-  (:id (max-1 (fn compare-times [x y]
-                ;; Reverse sort, get msg with min time
-                (- (:time y) (:time x)))
-              msgs)))
+  (let [msg-datas [(get-in msg [:data])]]
+    (log-messages session msg-datas)
+    (mark-latest-message session msg-datas)))
 
 (defn ask-for-backlog
-  [session before-id]
+  [{:as session :keys [state]} before-id]
   (println "Asking for backlog before" before-id)
   (send-message session
                 {:type "log"
                  :data {:n 1000
                         :before before-id}}))
 
-(defn do-snapshot-event
-  "Log an entire snapshot to file."
+(defn do-backlog-events
+  "Log an entire snapshot or log reply to file."
   [session msg]
+  ;; TODO: Check if lifecycle is actually :catchup before proceeding?
   (let [recent-log (get-in msg [:data :log])]
     (log-messages session recent-log)
-    ;; Start downloading entire room history
-    (println "Switching to full catchup mode!")
-    ;; Should maybe check if lifecycle is :waiting-for-snapshot ?
-    (alter (:state session) assoc-in [:logger :lifecycle] :full-catchup)
-    (ask-for-backlog session (oldest-msg-id recent-log))))
+    (let [newest (mark-latest-message session recent-log)]
+      (if (or (empty? recent-log)
+              (done-catching-up? session recent-log))
+        (do (println "All caught up, no more backlog. Now just tailing.")
+            (alter (:state session)
+                   assoc-in [:logger :lifecycle] :tailing)
+            (mark-catchup-complete session newest))
+        (ask-for-backlog session (:id (oldest-msg recent-log)))))))
 
-(defn do-log-reply
-  "Write backlog to file, ask for more if possible."
-  [session msg]
-  (let [recent-log (get-in msg [:data :log])]
-    (if (empty? recent-log)
-      (do (println "All caught up, no more backlog. Now just tailing.")
-          (alter (:state session) assoc-in [:logger :lifecycle] :tailing))
-      (do (log-messages session recent-log)
-          (ask-for-backlog session (oldest-msg-id recent-log))))))
+(defn do-before-halt
+  "Actions to take on halt."
+  [{:as session :keys [state]} _msg]
+  ;; Only mark newer messages as caughtup if log catchup finished
+  (when (= (-> @state :logger :lifecycle) :tailing)
+    (mark-catchup-complete session (-> @state :logger :last-seen-msg)))
+  (some-> @state :logger :writer .close))
 
 (def logger-dispatch
   "Reactive dispatch overlay for logger."
@@ -204,10 +248,10 @@ the :halt action if specified."
     #'do-send-event
 
     "snapshot-event"
-    #'do-snapshot-event
+    #'do-backlog-events
 
     "log-reply"
-    #'do-log-reply
+    #'do-backlog-events
 
     :unknown-type
     ;; (fn [session msg]
@@ -218,28 +262,33 @@ the :halt action if specified."
     #'debug-print-message
 
     :halt
-    (fn [session _msg]
-      (some-> session :state deref :logger :writer .close))}))
+    #'do-before-halt}))
 
-(defn find-last-logged
-  "Find the most recently logged message."
+(defn find-last-catchup-id
+  "Find the ID of the last message we'd caught up to, or nil."
   [logfile]
   (with-open [rdr (io/reader logfile :encoding "UTF-8")]
-    (max-1 (fn compare-times [x y]
-             (- (get-in x [:data :time])
-                (get-in y [:data :time])))
-           (json/parsed-seq rdr true))))
+    (->> (json/parsed-seq rdr true)
+         (filter #(= (:hl-type %) "caughtup"))
+         (last)
+         (:data)
+         (:id))))
 
 (defn -main
   "Demo connection to heim"
   [server room logfile]
   (let [w (io/writer logfile :encoding "UTF-8" :append true)
-        ;; FIXME unused
-        last-logged-id (:id (:data (find-last-logged logfile)))
-        _ (println "Last logged message ID:" last-logged-id)
         session (run server room
-                     {:logger {:lifecycle :waiting-for-snapshot
-                               :path logfile
-                               :writer w}}
+                     {:logger
+                      {:lifecycle :catchup
+                       ;; Last message ID from last session,
+                       ;; used for backlog catchup
+                       :catchup-to-id (find-last-catchup-id logfile)
+                       ;; Last message from this session, used
+                       ;; to mark place for next session's
+                       ;; catchup.
+                       :last-seen-msg nil
+                       :path logfile
+                       :writer w}}
                      logger-dispatch)]
     session))
