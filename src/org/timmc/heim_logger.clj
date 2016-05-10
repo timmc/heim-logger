@@ -54,7 +54,7 @@
 
 (defn react-to
   [{:as session :keys [wc state sender dispatch]}]
-  (while true ;; (not= (get-in @state [:base :lifecycle]) :end)
+  (while (not= (get-in @state [:base :lifecycle]) :ending)
     (let [msg (json/parse-string @(s/take! wc) true)]
       (auto-respond session msg dispatch))))
 
@@ -66,11 +66,15 @@
 
 - :state A ref of session state
 - :wc Websocket client
-- :sender An agent used to send messages in coordination with state changes"
-  [server room dispatch]
+- :sender An agent used to send messages in coordination with state changes
+
+Accepts server (string), room name (string, no ampersand),
+more-state (map of additional state entries), and dispatch (function
+of session and message)."
+  [server room more-state dispatch]
   (let [url (address server room)
         wc @(ah/websocket-client url)
-        state (ref initial-state)
+        state (ref (merge initial-state (or more-state {})))
         sender (agent nil
                       :error-handler (fn sender-error [a e]
                                        (println "Error in sender agent.")
@@ -86,6 +90,23 @@
                                (throw t))))]
     session))
 
+(defn halt
+  "Halt the session by setting the lifecycle to :ending and calling
+the :halt action if specified."
+  [session]
+  ;; Run any cleanup actions
+  (try
+    (when-let [halt-action (-> session :dispatch :halt)]
+      (halt-action session nil))
+    (catch Throwable t
+      ;; Don't let anything get in the way of closing the socket.
+      (.printStackTrace t)))
+  ;; Mark lifecycle as ending to shut down reactor
+  (dosync
+   (alter (:state session) assoc-in [:base :lifecycle] :ending))
+  ;; Kill it
+  (-> session :wc .close))
+
 ;; TODO
 #_      (when (:throttled msg)
         (println "Throttled, sleeping.")
@@ -94,36 +115,40 @@
 ;; ============
 
 (defn do-nothing
-  [session msg])
+  [_session _msg])
+
+(defn log-message
+  "Log one message to file."
+  [session msg]
+  (let [w (-> session :state deref :logger :writer)]
+    (binding [*out* w]
+      (prn msg))
+    (.flush w)))
 
 (def logger-dispatch
+  "Reactive dispatch overlay for logger."
   (merge
    (base-dispatch "hillbot")
    {"send-event"
-    do-nothing
-
-    "join-event"
-    do-nothing
-
-    "part-event"
-    do-nothing
-
-    "nick-event"
-    do-nothing
-
-    "nick-reply"
-    do-nothing
-
-    :pre
-    (fn [session msg]
-      (prn msg))
+    #'log-message
 
     :unknown-type
-    (fn [session msg]
-      (println "Unknown event type:" (:type msg)))}))
+    ;; (fn [session msg]
+    ;;   (println "Unknown event type:" (:type msg)))
+    do-nothing
+
+    :halt
+    (fn [session _msg]
+      (some-> session :state deref :logger :writer .close))}))
 
 (defn -main
   "Demo connection to heim"
-  [server room]
-  (let [session (run server room logger-dispatch)]
-    ))
+  [server room outfile]
+  (let [w (-> (java.io.FileOutputStream. outfile true)
+              (java.io.OutputStreamWriter. "UTF-8")
+              (java.io.BufferedWriter.))
+        session (run server room
+                     {:logger {:out outfile
+                               :writer w}}
+                     logger-dispatch)]
+    session))
