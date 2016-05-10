@@ -1,8 +1,9 @@
 (ns org.timmc.heim-logger
-  (:require [clojure.string :as str]
-            [aleph.http :as ah]
-            [manifold.stream :as s]
-            [cheshire.core :as json]))
+  (:require [aleph.http :as ah]
+            [cheshire.core :as json]
+            [clojure.java.io :as io]
+            [clojure.string :as str]
+            [manifold.stream :as s]))
 
 (defn pencode
   "Percent-encode for URLs (conservatively.)"
@@ -117,38 +118,82 @@ the :halt action if specified."
 (defn do-nothing
   [_session _msg])
 
-(defn log-message
-  "Log one message to file."
-  [session msg]
+(defn debug-print-message
+  [_session msg]
+  #_(println msg))
+
+(defn log-messages
+  "Log message datas to file."
+  [session event-datas]
   (let [w (-> session :state deref :logger :writer)]
     (binding [*out* w]
-      (prn msg))
+      (doseq [m event-datas]
+        (println (json/generate-string {:hl-type "message"
+                                        :data m}))))
     (.flush w)))
+
+(defn log-send-event
+  "Log a single new message to file."
+  [session send-msg]
+  (log-messages session [(get-in send-msg [:data])]))
+
+(defn log-snapshot-event
+  "Log an entire snapshot to file."
+  [session snapshot-msg]
+  (log-messages session (get-in snapshot-msg [:data :log])))
 
 (def logger-dispatch
   "Reactive dispatch overlay for logger."
   (merge
    (base-dispatch "hillbot")
    {"send-event"
-    #'log-message
+    #'log-send-event
+
+    "snapshot-event"
+    #'log-snapshot-event
 
     :unknown-type
     ;; (fn [session msg]
     ;;   (println "Unknown event type:" (:type msg)))
     do-nothing
 
+    :pre
+    #'debug-print-message
+
     :halt
     (fn [session _msg]
       (some-> session :state deref :logger :writer .close))}))
 
+;; Consider exporting to org.timmc/handy
+(defn max-1
+  "Find the largest element in coll with respect to the comparator,
+yielding it as the single element of a collection. When coll is
+empty, yields nil."
+  [comparator coll]
+  (when (seq coll)
+    (reduce (fn [accum item]
+              (if (neg? (comparator accum item))
+                item
+                accum))
+            (first coll)
+            (rest coll))))
+
+;; FIXME unused
+(defn find-last-logged
+  "Find the most recently logged message."
+  [logfile]
+  (with-open [rdr (io/reader logfile :encoding "UTF-8")]
+    (max-1 (fn compare-times [x y]
+             (- (get-in x ["data" "time"])
+                (get-in y ["data" "time"])))
+           (json/parsed-seq rdr))))
+
 (defn -main
   "Demo connection to heim"
-  [server room outfile]
-  (let [w (-> (java.io.FileOutputStream. outfile true)
-              (java.io.OutputStreamWriter. "UTF-8")
-              (java.io.BufferedWriter.))
+  [server room logfile]
+  (let [w (io/writer logfile :encoding "UTF-8" :append true)
         session (run server room
-                     {:logger {:out outfile
+                     {:logger {:path logfile
                                :writer w}}
                      logger-dispatch)]
     session))
