@@ -212,9 +212,13 @@ next time."
 (defn ask-for-backlog
   [{:as session :keys [state]} before-id]
   (println "Asking for backlog before" before-id)
+  ;; TODO: Use max log request size of 1000, but implement backoff if
+  ;; we get errors like:
+  ;; WARNING: error in websocket client
+  ;; io.netty.handler.codec.CorruptedFrameException: Max frame length of 65536 has been exceeded.
   (send-message session
                 {:type "log"
-                 :data {:n 1000
+                 :data {:n 100
                         :before before-id}}))
 
 (defn do-backlog-events
