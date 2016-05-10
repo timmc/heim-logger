@@ -5,6 +5,20 @@
             [clojure.string :as str]
             [manifold.stream :as s]))
 
+;; Consider exporting to org.timmc/handy
+(defn max-1
+  "Find the largest element in coll with respect to the comparator,
+yielding it as the single element of a collection. When coll is
+empty, yields nil."
+  [comparator coll]
+  (when (seq coll)
+    (reduce (fn [accum item]
+              (if (neg? (comparator accum item))
+                item
+                accum))
+            (first coll)
+            (rest coll))))
+
 (defn pencode
   "Percent-encode for URLs (conservatively.)"
   [s]
@@ -46,6 +60,10 @@
 
 (defn auto-respond
   [session msg dispatch]
+  ;; FIXME: Really shouldn't run dispatched things in a dosync,
+  ;; there's no reason to believe they won't do side-effects!
+  ;; However, it does provide the convenience of not releasing msg
+  ;; sends until the state has been altered...
   (dosync
    (when-let [pre-handler (get dispatch :pre)]
      (pre-handler session msg))
@@ -120,7 +138,12 @@ the :halt action if specified."
 
 (defn debug-print-message
   [_session msg]
-  #_(println msg))
+  (let [oops (select-keys msg [:error :throttled :throttled_reason])]
+    (if (every? (some-fn nil? false?) (keys oops))
+      (do ;; successful event/reply
+        #_(println msg))
+      (do ;; something's wrong
+        (println msg)))))
 
 (defn log-messages
   "Log message datas to file."
@@ -132,25 +155,59 @@ the :halt action if specified."
                                         :data m}))))
     (.flush w)))
 
-(defn log-send-event
+(defn do-send-event
   "Log a single new message to file."
-  [session send-msg]
-  (log-messages session [(get-in send-msg [:data])]))
+  [session msg]
+  (log-messages session [(get-in msg [:data])]))
 
-(defn log-snapshot-event
+(defn oldest-msg-id
+  [msgs]
+  (:id (max-1 (fn compare-times [x y]
+                ;; Reverse sort, get msg with min time
+                (- (:time y) (:time x)))
+              msgs)))
+
+(defn ask-for-backlog
+  [session before-id]
+  (println "Asking for backlog before" before-id)
+  (send-message session
+                {:type "log"
+                 :data {:n 1000
+                        :before before-id}}))
+
+(defn do-snapshot-event
   "Log an entire snapshot to file."
-  [session snapshot-msg]
-  (log-messages session (get-in snapshot-msg [:data :log])))
+  [session msg]
+  (let [recent-log (get-in msg [:data :log])]
+    (log-messages session recent-log)
+    ;; Start downloading entire room history
+    (println "Switching to full catchup mode!")
+    ;; Should maybe check if lifecycle is :waiting-for-snapshot ?
+    (alter (:state session) assoc-in [:logger :lifecycle] :full-catchup)
+    (ask-for-backlog session (oldest-msg-id recent-log))))
+
+(defn do-log-reply
+  "Write backlog to file, ask for more if possible."
+  [session msg]
+  (let [recent-log (get-in msg [:data :log])]
+    (if (empty? recent-log)
+      (do (println "All caught up, no more backlog. Now just tailing.")
+          (alter (:state session) assoc-in [:logger :lifecycle] :tailing))
+      (do (log-messages session recent-log)
+          (ask-for-backlog session (oldest-msg-id recent-log))))))
 
 (def logger-dispatch
   "Reactive dispatch overlay for logger."
   (merge
    (base-dispatch "hillbot")
    {"send-event"
-    #'log-send-event
+    #'do-send-event
 
     "snapshot-event"
-    #'log-snapshot-event
+    #'do-snapshot-event
+
+    "log-reply"
+    #'do-log-reply
 
     :unknown-type
     ;; (fn [session msg]
@@ -164,36 +221,25 @@ the :halt action if specified."
     (fn [session _msg]
       (some-> session :state deref :logger :writer .close))}))
 
-;; Consider exporting to org.timmc/handy
-(defn max-1
-  "Find the largest element in coll with respect to the comparator,
-yielding it as the single element of a collection. When coll is
-empty, yields nil."
-  [comparator coll]
-  (when (seq coll)
-    (reduce (fn [accum item]
-              (if (neg? (comparator accum item))
-                item
-                accum))
-            (first coll)
-            (rest coll))))
-
-;; FIXME unused
 (defn find-last-logged
   "Find the most recently logged message."
   [logfile]
   (with-open [rdr (io/reader logfile :encoding "UTF-8")]
     (max-1 (fn compare-times [x y]
-             (- (get-in x ["data" "time"])
-                (get-in y ["data" "time"])))
-           (json/parsed-seq rdr))))
+             (- (get-in x [:data :time])
+                (get-in y [:data :time])))
+           (json/parsed-seq rdr true))))
 
 (defn -main
   "Demo connection to heim"
   [server room logfile]
   (let [w (io/writer logfile :encoding "UTF-8" :append true)
+        ;; FIXME unused
+        last-logged-id (:id (:data (find-last-logged logfile)))
+        _ (println "Last logged message ID:" last-logged-id)
         session (run server room
-                     {:logger {:path logfile
+                     {:logger {:lifecycle :waiting-for-snapshot
+                               :path logfile
                                :writer w}}
                      logger-dispatch)]
     session))
