@@ -31,7 +31,8 @@ empty, yields nil."
 (defn send-message
   [{:as session :keys [sender wc]} msg]
   (send sender (fn serial-send [_]
-                 (doto wc (s/put! (json/generate-string msg)))))
+                 (let [omsg (json/generate-string msg)]
+                   (doto wc (s/put! omsg)))))
   nil)
 
 
@@ -74,7 +75,12 @@ empty, yields nil."
 (defn react-to
   [{:as session :keys [wc state sender dispatch]}]
   (while (not= (get-in @state [:base :lifecycle]) :ending)
-    (let [msg (json/parse-string @(s/take! wc) true)]
+    (let [raw @(s/take! wc)
+          msg (try
+                (json/parse-string raw true)
+                (catch Throwable t
+                  (println "Raw message was:" raw)
+                  (throw t)))]
       (auto-respond session msg dispatch))))
 
 (def initial-state
@@ -278,8 +284,8 @@ next time."
          (:data)
          (:id))))
 
-(defn -main
-  "Demo connection to heim"
+(defn start-logger
+  "Start logging and yield a session object."
   [server room logfile]
   (let [w (io/writer logfile :encoding "UTF-8" :append true)
         session (run server room
@@ -296,3 +302,14 @@ next time."
                        :writer w}}
                      logger-dispatch)]
     session))
+
+(defn -main
+  "Run logger and close it on shutdown. Arguments:
+
+- server is the heim host (requires secure websocket protocol)
+- room is the heim room (without ampersand)
+- logfile is the file where logs will be written to (and read from for catchup)"
+  [server room logfile]
+  (let [session (start-logger server room logfile)]
+    (.addShutdownHook (Runtime/getRuntime)
+                      (Thread. #(halt session) "logger shutdown hook"))))
