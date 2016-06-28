@@ -215,6 +215,14 @@ next time."
     (log-messages session msg-datas)
     (mark-latest-message session msg-datas)))
 
+(def backlog-window-size
+  "How many messages to ask for in each backlog request.
+
+Keep this small to avoid max frame length issues, but larger than 10
+to avoid the issue where we sometimes only get 1024 bytes from
+euphoria.io"
+  23)
+
 (defn ask-for-backlog
   [{:as session :keys [state]} before-id]
   (println "Asking for backlog before" before-id)
@@ -224,7 +232,7 @@ next time."
   ;; io.netty.handler.codec.CorruptedFrameException: Max frame length of 65536 has been exceeded.
   (send-message session
                 {:type "log"
-                 :data {:n 100
+                 :data {:n backlog-window-size
                         :before before-id}}))
 
 (defn do-backlog-events
