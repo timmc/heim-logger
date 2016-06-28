@@ -6,6 +6,6 @@
   :dependencies [[org.clojure/clojure "1.7.0"]
                  [aleph "0.4.0"]
                  [cheshire "5.5.0"]]
-  :main ^:no-aot org.timmc.heim-logger
+  :main ^:no-aot org.timmc.heim-logger.v1
   :jvm-opts ["-Xmx100M"]
   )

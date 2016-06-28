@@ -1,9 +1,9 @@
-(ns org.timmc.heim-logger
+(ns org.timmc.heim-logger.v1
   (:require [aleph.http :as ah]
             [cheshire.core :as json]
             [clojure.java.io :as io]
-            [clojure.string :as str]
-            [manifold.stream :as s]))
+            [manifold.stream :as s]
+            [org.timmc.heim-logger.common :as cm]))
 
 ;; Consider exporting to org.timmc/handy
 (defn max-1
@@ -18,15 +18,6 @@ empty, yields nil."
                 accum))
             (first coll)
             (rest coll))))
-
-(defn pencode
-  "Percent-encode for URLs (conservatively.)"
-  [s]
-  (str/replace (java.net.URLEncoder/encode s "UTF-8") "+" "%20"))
-
-(defn address
-  [server room]
-  (format "wss://%s/room/%s/ws" server (pencode room)))
 
 (defn send-message
   [{:as session :keys [sender wc]} msg]
@@ -97,7 +88,7 @@ Accepts server (string), room name (string, no ampersand),
 more-state (map of additional state entries), and dispatch (function
 of session and message)."
   [server room more-state dispatch]
-  (let [url (address server room)
+  (let [url (cm/address server room)
         wc @(ah/websocket-client url)
         state (ref (merge initial-state (or more-state {})))
         sender (agent nil
