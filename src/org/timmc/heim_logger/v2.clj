@@ -5,17 +5,17 @@
             [org.timmc.heim-logger.common :as cm]))
 
 (defn send-msg
-  [state msg]
-  (ws/send-msg @(:socket @state)
+  [session msg]
+  (ws/send-msg @(:socket @session)
                (json/generate-string msg)))
 
 (defn on-connect
-  [state session]
-  (send-msg state {:type "nick"
-                   :data {:name "hillbot v2"}}))
+  [session _jetty-ws-session]
+  (send-msg session {:type "nick"
+                     :data {:name "hillbot v2"}}))
 
 (defn on-receive
-  [state raw]
+  [session raw]
   (let [msg (try
               (json/parse-string raw true)
               (catch Throwable t
@@ -23,9 +23,11 @@
                 (throw t)))
         mtype (:type msg)
         data (:data msg)]
+    (when-let [error (:error msg)]
+      (println msg))
     (case mtype
       "ping-event"
-      (send-msg state
+      (send-msg session
                 {:type "ping-reply",
                  :data {:time (:time data)}})
 
@@ -43,25 +45,25 @@
       
       "nick-event"
       (println "NICK" (:from data) "->" (:to data))
-      
+
       ;; :else
       (println "received" mtype))))
 
-(defn test-gniazdo
-  []
-  (let [state (atom {:session nil
-                     :socket (promise)})
+(defn connect
+  "Connect to a room and yield a session."
+  [room]
+  (let [session (atom {:socket (promise)})
         socket (ws/connect
-                (cm/address "euphoria.io" "space")
-                :on-connect (partial on-connect state)
-                :on-receive (partial on-receive state))]
+                (cm/address "euphoria.io" room)
+                :on-connect (partial on-connect session)
+                :on-receive (partial on-receive session))]
     ;; This is how we tie the asynchronous knot: Block any use of the
     ;; socket until we have time to set it! (Otherwise there's a race
     ;; condition where we might want to send a reply before reaching
     ;; this line -- would require a fast connection and a long context
     ;; switch or GC pause, of course.)
-    (deliver (:socket @state) socket)
-    state))
+    (deliver (:socket @session) socket)
+    session))
 
 ;; --
 
