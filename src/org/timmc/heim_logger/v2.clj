@@ -34,8 +34,9 @@ Yield a response object or throw an exception-info with the following
 fields:
 
 - `:source` with constant `:call-command-blocking-receive`
-- `:type` with either `:timeout` for receive timeout or `:unexpected`
-  for an unknown exception
+- `:type` with `:timeout` for receive timeout, `:unexpected`
+  for an unknown exception, or `:sending-e` for a message that
+  could not be sent (due to an exception).
 - `:packet-id` with the ID string of the packet that was
   sent (possibly useful if logging all Rx and Tx packets."
   [session ptype pdata]
@@ -48,10 +49,18 @@ fields:
            {:start (now<-call-command-blocking-start)
             :result recv-promise})
     ;; Now send! We'll use the ID to find the response.
-    (ws/send-msg (ssocket session)
-                 (json/generate-string {:type (name ptype)
-                                        :data pdata
-                                        :id packet-id}))
+    (try
+      (ws/send-msg (ssocket session)
+                   (json/generate-string {:type (name ptype)
+                                          :data pdata
+                                          :id packet-id}))
+      (catch Exception e
+        ;; Probably org.eclipse.jetty.websocket.api.WebSocketException
+        (throw (ex-info "Exception while sending blocking call command"
+                        {:type :sending-e
+                         :source :call-command-blocking-receive
+                         :packet-id packet-id}
+                        e))))
     ;; Wait for results. Timeout may underestimate length of call.
     (try
       (let [response (deref recv-promise
@@ -100,7 +109,7 @@ fields:
         data (:data msg)]
     (maybe-deliver-blocking-call-result session msg)
     (when-let [error (:error msg)]
-      (println "ERROR" msg))
+      (println "ERROR-PACKET" msg))
     (case mtype
       "ping-event"
       (send-packet session "ping-reply" {:time (:time data)})
@@ -123,6 +132,10 @@ fields:
       ;; :else
       (println "received" mtype))))
 
+(defn on-error
+  [session ^Throwable err]
+  (println "WS-ERROR" err))
+
 (defn connect
   "Connect to a room and yield a session."
   [room]
@@ -138,7 +151,8 @@ fields:
                 (cm/address "euphoria.io" room)
                 ;; Var indirection should allow code reloading during a session.
                 :on-connect (partial #'on-connect session)
-                :on-receive (partial #'on-receive session))]
+                :on-receive (partial #'on-receive session)
+                :on-error (partial #'on-error session))]
     ;; This is how we tie the asynchronous knot: Block any use of the
     ;; socket until we have time to set it! (Otherwise there's a race
     ;; condition where we might want to send a reply before reaching
