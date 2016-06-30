@@ -4,15 +4,21 @@
             [gniazdo.core :as ws]
             [org.timmc.heim-logger.common :as cm]))
 
-(defn send-msg
-  [session msg]
-  (ws/send-msg @(:socket @session)
-               (json/generate-string msg)))
+(defn ssocket
+  "Get the socket from a session."
+  [session]
+  @(:socket @session))
+
+(defn send-packet
+  "Send a heim packet of the given type and data and return immediately."
+  [session ptype pdata]
+  (ws/send-msg (ssocket session)
+               (json/generate-string {:type (name ptype)
+                                      :data pdata})))
 
 (defn on-connect
   [session _jetty-ws-session]
-  (send-msg session {:type "nick"
-                     :data {:name "hillbot v2"}}))
+  (send-packet session "nick" {:name "hillbot v2"}))
 
 (defn on-receive
   [session raw]
@@ -24,12 +30,10 @@
         mtype (:type msg)
         data (:data msg)]
     (when-let [error (:error msg)]
-      (println msg))
+      (println "ERROR" msg))
     (case mtype
       "ping-event"
-      (send-msg session
-                {:type "ping-reply",
-                 :data {:time (:time data)}})
+      (send-packet session "ping-reply" {:time (:time data)})
 
       "send-event"
       (let [{:keys [sender, content]} data
