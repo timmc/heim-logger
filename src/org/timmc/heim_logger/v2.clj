@@ -59,8 +59,9 @@
   (let [session (atom {:socket (promise)})
         socket (ws/connect
                 (cm/address "euphoria.io" room)
-                :on-connect (partial on-connect session)
-                :on-receive (partial on-receive session))]
+                ;; Var indirection should allow code reloading during a session.
+                :on-connect (partial #'on-connect session)
+                :on-receive (partial #'on-receive session))]
     ;; This is how we tie the asynchronous knot: Block any use of the
     ;; socket until we have time to set it! (Otherwise there's a race
     ;; condition where we might want to send a reply before reaching
