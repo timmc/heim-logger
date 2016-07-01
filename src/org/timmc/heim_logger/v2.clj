@@ -4,7 +4,8 @@
             [gniazdo.core :as ws]
             [org.timmc.heim-logger.common :as cm])
   (:import (clojure.lang ExceptionInfo)
-           (java.util.concurrent.atomic AtomicLong)))
+           (java.util.concurrent.atomic AtomicLong)
+           (org.eclipse.jetty.websocket.common WebSocketSession)))
 
 (defn ssocket
   "Get the socket from a session."
@@ -20,7 +21,7 @@
 
 (def blocking-call-timeout-ms
   "How many milliseconds to wait, maximum, on a blocking call."
-  5000)
+  60000)
 
 (defn now<-call-command-blocking-start
   "Redefable time lookup."
@@ -95,7 +96,9 @@ fields:
       (deliver blocked-promise msg))))
 
 (defn on-connect
-  [session _jetty-ws-session]
+  [session ^WebSocketSession jetty-ws-session]
+  (.setMaxTextMessageSize (.getPolicy jetty-ws-session)
+                          655360)
   (send-packet session "nick" {:name "hillbot v2"}))
 
 (defn on-receive
