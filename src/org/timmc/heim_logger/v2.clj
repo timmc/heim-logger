@@ -118,10 +118,10 @@ fields:
       (send-packet session "ping-reply" {:time (:time data)})
 
       "send-event"
-      (let [{:keys [sender, content]} data
-            {nick :name, id :id} sender]
-        (println (format "RECV %s(%s) -> %s"
-                         nick id content)))
+      (let [{:keys [sender, content, parent], msg-id :id} data
+            {nick :name, user-id :id} sender]
+        (println (format "RECV %s/%s %s(%s) -> %s"
+                         parent msg-id nick user-id content)))
 
       "join-event"
       (println "JOIN" (:name data))
