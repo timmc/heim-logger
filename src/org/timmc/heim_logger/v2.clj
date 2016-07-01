@@ -141,9 +141,10 @@ fields:
 
 (defn connect
   "Connect to a room and yield a session."
-  [room]
+  [server room]
   (let [id-counter (AtomicLong.)
-        session (atom { ;; Promise of an implementation-defined
+        session (atom {:room room
+                       ;; Promise of an implementation-defined
                        ;; "socket" object we can send to or close.
                        :socket (promise)
                        ;; AtomicLong, source of unique IDs for packets.
@@ -151,7 +152,7 @@ fields:
                        ;; Registry of in-flight blocking calls, by packet-id.
                        :blocking-calls {}})
         socket (ws/connect
-                (cm/address "euphoria.io" room)
+                (cm/address server room)
                 ;; Var indirection should allow code reloading during a session.
                 :on-connect (partial #'on-connect session)
                 :on-receive (partial #'on-receive session)
@@ -168,17 +169,17 @@ fields:
 
 (defn start
   "Start logger and return a session object."
-  [server room logfile]
-  (println "starting" room)
-  (.start (Thread. (while true
-                     5)))
-  {:room room})
+  [server room _logfile]
+  (.start (Thread. #(while true (Thread/sleep 5000000))
+                   "Designated non-daemon thread for heim-logger"))
+  (connect server room))
 
 (defn stop
   "Halt logger using session object."
   [session]
-  (println "halting" session)
-  (flush))
+  (println "halting" (:room @session))
+  (flush)
+  (ws/close (ssocket session)))
 
 (defn -main
   "Run logger and close it on shutdown. Arguments:
