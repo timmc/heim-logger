@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -eu
+
 HEIM_ROOM=$1
 
 cd "$( dirname "${BASH_SOURCE[0]}" )"
